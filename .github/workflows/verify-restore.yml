@@ -1,0 +1,65 @@
+# 매월 복구 검증: 최신 백업을 빈 데이터베이스에 실제로 되살리고 운영 데이터와 대조한다.
+name: 월간 복구 검증
+on:
+  schedule:
+    - cron: "17 20 1 * *" # 매월 2일 한국 시각 새벽 5시 17분
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17
+        env: { POSTGRES_PASSWORD: restore, POSTGRES_DB: restore }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL_SESSION }}
+      RESTORED_DATABASE_URL: postgres://postgres:restore@localhost:5432/restore
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+      RESTIC_REPOSITORY: ${{ secrets.RESTIC_REPOSITORY }}
+      RESTIC_PASSWORD: ${{ secrets.BACKUP_PASSPHRASE }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+      RCLONE_CONFIG_B2_TYPE: b2
+      RCLONE_CONFIG_B2_ACCOUNT: ${{ secrets.B2_KEY_ID }}
+      RCLONE_CONFIG_B2_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+      RCLONE_CONFIG_B2CRYPT_TYPE: crypt
+      RCLONE_CONFIG_B2CRYPT_REMOTE: b2:${{ secrets.B2_BUCKET }}/originals-encrypted
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+      MIRROR_REMOTE: "b2crypt:"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: 도구 설치
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17 restic rclone
+          OBSCURED=$(rclone obscure "$BACKUP_PASSPHRASE")
+          echo "::add-mask::$OBSCURED"
+          echo "RCLONE_CONFIG_B2CRYPT_PASSWORD=$OBSCURED" >> "$GITHUB_ENV"
+      - name: 최신 백업 꺼내기
+        run: restic restore latest --host girokso --target restored
+      - name: 빈 데이터베이스에 되살리기
+        run: |
+          DUMP=$(find restored -name girokso.dump | head -1)
+          test -n "$DUMP" || { echo "백업 안에 데이터베이스 사본이 없습니다"; exit 1; }
+          # 검색용 확장 기능이 어느 스키마에 있었는지 사본에서 읽어 똑같이 만든다
+          TRGM_SCHEMA=$(pg_restore --section=post-data -f - "$DUMP" | grep -o '[a-z_]*\.gin_trgm_ops' | head -1 | cut -d. -f1)
+          TRGM_SCHEMA=${TRGM_SCHEMA:-public}
+          psql -q "$RESTORED_DATABASE_URL" -c "drop schema public cascade"
+          pg_restore --no-owner --no-privileges --exit-on-error --section=pre-data -d "$RESTORED_DATABASE_URL" "$DUMP"
+          psql -q "$RESTORED_DATABASE_URL" -c "create schema if not exists $TRGM_SCHEMA" -c "create extension if not exists pg_trgm schema $TRGM_SCHEMA"
+          pg_restore --no-owner --no-privileges --exit-on-error --section=data --section=post-data -d "$RESTORED_DATABASE_URL" "$DUMP"
+      - name: 운영 데이터와 대조
+        run: npm run verify-restore

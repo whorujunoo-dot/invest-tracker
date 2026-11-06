@@ -1,0 +1,72 @@
+# 매일 백업: 원본 파일은 암호화해서 Backblaze B2에 복사하고(덮어쓰기·삭제 없음),
+# 데이터베이스 전체와 마크다운 내보내기는 restic으로 암호화해 날짜별로 보관한다.
+name: 매일 백업
+on:
+  schedule:
+    - cron: "41 18 * * *" # 한국 시각 새벽 3시 41분
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency: { group: backup, cancel-in-progress: false }
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL_SESSION }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+      RESTIC_REPOSITORY: ${{ secrets.RESTIC_REPOSITORY }}
+      RESTIC_PASSWORD: ${{ secrets.BACKUP_PASSPHRASE }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+      RCLONE_CONFIG_R2_TYPE: s3
+      RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+      RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      RCLONE_CONFIG_B2_TYPE: b2
+      RCLONE_CONFIG_B2_ACCOUNT: ${{ secrets.B2_KEY_ID }}
+      RCLONE_CONFIG_B2_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+      RCLONE_CONFIG_B2CRYPT_TYPE: crypt
+      RCLONE_CONFIG_B2CRYPT_REMOTE: b2:${{ secrets.B2_BUCKET }}/originals-encrypted
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: 백업 도구 설치
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17 restic rclone
+      - name: 암호 설정
+        run: |
+          OBSCURED=$(rclone obscure "$BACKUP_PASSPHRASE")
+          echo "::add-mask::$OBSCURED"
+          echo "RCLONE_CONFIG_B2CRYPT_PASSWORD=$OBSCURED" >> "$GITHUB_ENV"
+      - name: 원본 파일 복사 (R2 → B2, 암호화, 기존 파일은 절대 덮어쓰지 않음)
+        run: |
+          rclone copy "r2:$R2_BUCKET" "b2crypt:" --immutable --transfers 8 --stats-one-line --stats 60s
+      - name: 데이터베이스 전체 사본
+        run: |
+          mkdir -p backup
+          pg_dump "$DATABASE_URL" --schema=public --no-owner --no-privileges -Fc -f backup/girokso.dump
+          ls -la backup
+      - name: 마크다운 내보내기
+        run: npm run export -- backup/export
+      - name: 암호화 보관 (restic)
+        run: |
+          restic cat config >/dev/null 2>&1 || restic init
+          restic backup backup --tag daily --host girokso
+          restic forget --host girokso --keep-daily 30 --keep-weekly 26 --keep-monthly 120 --keep-yearly 100 --prune
+          restic check --read-data-subset=1/30
+      - name: 결과 기록
+        if: always()
+        run: |
+          SIZE=$(du -sh backup 2>/dev/null | cut -f1 || echo "?")
+          npx tsx scripts/record-run.ts backup ${{ job.status == 'success' && 'ok' || 'fail' }} "{\"size\":\"$SIZE\",\"run\":\"${{ github.run_id }}\"}"

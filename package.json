@@ -1,0 +1,36 @@
+{
+  "name": "girokso",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "telegram:webhook": "tsx scripts/set-webhook.ts",
+    "export": "tsx scripts/export.ts",
+    "verify-restore": "tsx scripts/verify-restore.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.1.0",
+    "@aws-sdk/client-s3": "3.1155.0",
+    "@aws-sdk/s3-request-presigner": "3.1155.0",
+    "next": "16.4.2",
+    "postgres": "3.4.9",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12"
+  },
+  "engines": { "node": ">=22" }
+}

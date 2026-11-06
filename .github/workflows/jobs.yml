@@ -1,0 +1,18 @@
+# 밀린 처리 작업(받아쓰기 재시도 등)을 매시간 다시 돌린다.
+name: 처리 대기열
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+permissions: {}
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: 대기 작업 처리
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/jobs/run" -o /dev/null -w "%{http_code}\n"

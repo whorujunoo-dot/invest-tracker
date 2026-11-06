@@ -1,0 +1,28 @@
+# 처음 설치할 때, 그리고 데이터베이스 구조가 바뀔 때 한 번 실행한다.
+# GitHub → Actions → "설치·연결" → Run workflow
+name: 설치·연결
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["db/migrations/**"]
+permissions:
+  contents: read
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL_SESSION }}
+      APP_URL: ${{ secrets.APP_URL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: 데이터베이스 구조 만들기
+        run: npm run db:migrate
+      - name: 텔레그램 봇 연결
+        run: npm run telegram:webhook
